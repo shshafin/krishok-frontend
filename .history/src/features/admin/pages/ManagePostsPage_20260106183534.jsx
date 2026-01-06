@@ -115,29 +115,17 @@ export default function ManagePostsPage() {
   }, [loadNextChunk]);
 
   // ✅ Delete post
-  // ✅ Delete post function in ManagePostsPage.jsx
   const handleDelete = async (postId) => {
-    if (!window.confirm("আপনি কি নিশ্চিত যে এই পোস্টটি ডিলিট করতে চান?"))
-      return;
-
+    if (!window.confirm("Are you sure you want to delete this post?")) return;
     try {
-      // UI animation active koro
       setRemoving((prev) => ({ ...prev, [postId]: true }));
-
-      // API call
-      const response = await deletePost(postId);
-
-      if (response.success || response.status === 200) {
-        // Local state theke remove koro
-        setAllPosts((prev) => prev.filter((p) => p.id !== postId));
-        setItems((prev) => prev.filter((p) => p.id !== postId));
-        toast.success("পোস্টটি সফলভাবে ডিলিট করা হয়েছে!");
-      } else {
-        throw new Error("Failed to delete");
-      }
+      await deletePost(postId);
+      setAllPosts((prev) => prev.filter((p) => p.id !== postId));
+      setItems((prev) => prev.filter((p) => p.id !== postId));
+      toast.success("Post deleted successfully!");
     } catch (err) {
-      console.error("Delete Error:", err);
-      toast.error("পোস্ট ডিলিট করতে সমস্যা হয়েছে");
+      console.error(err);
+      toast.error("Failed to delete post");
       setRemoving((prev) => {
         const copy = { ...prev };
         delete copy[postId];

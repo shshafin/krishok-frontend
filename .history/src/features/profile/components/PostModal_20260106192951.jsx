@@ -179,7 +179,7 @@ export default function PostModal({
                     ) : (
                       <img
                         src={item.src}
-                        // alt={TEXT_MEDIA_ALT}
+                        alt={TEXT_MEDIA_ALT}
                         ref={(node) => {
                           slideImgRefs.current[index] = node;
                         }}

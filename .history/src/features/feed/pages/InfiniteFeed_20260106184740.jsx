@@ -1,20 +1,33 @@
 /* eslint-disable no-unused-vars */
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "react-hot-toast";
-import { useSearchParams, useNavigate, useLocation } from "react-router-dom";
+
 import PostCard from "@/features/profile/components/PostCard";
 import PostModal from "@/features/profile/components/PostModal";
+
 import {
   fetchPosts,
   fetchMe,
   likePost,
   commentOnPost,
   deleteComment,
-  fetchSinglePost,
 } from "@/api/authApi";
+
 import { baseApi } from "../../../api";
 
-// --- HELPERS ---
+const INITIAL_CHUNK = 30;
+const SUBSEQUENT_CHUNK = 10;
+const FALLBACK_AVATAR =
+  "https://i.postimg.cc/fRVdFSbg/e1ef6545-86db-4c0b-af84-36a726924e74.png";
+const TEXT_UNKNOWN_USER =
+  "\u0985\u099C\u09BE\u09A8\u09BE \u09AC\u09CD\u09AF\u09AC\u09B9\u09BE\u09B0\u0995\u09BE\u09B0\u09C0";
+const TEXT_UNKNOWN_AUTHOR =
+  "\u0985\u09A8\u09BE\u09AE\u09BE \u09B2\u09C7\u0996\u0995";
+const TEXT_ANONYMOUS_LIKE_PREFIX =
+  "\u0985\u099C\u09BE\u09A8\u09BE \u09AA\u09B8\u09A8\u09CD\u09A6";
+const TEXT_ANONYMOUS_COMMENT_PREFIX =
+  "\u0985\u099C\u09BE\u09A8\u09BE \u09AE\u09A8\u09CD\u09A4\u09AC\u09CD\u09AF\u0995\u09BE\u09B0\u09C0";
+
 const ensureAbsoluteUrl = (url) => {
   if (!url) return null;
   if (url.startsWith("http") || url.startsWith("blob:")) return url;
@@ -23,7 +36,9 @@ const ensureAbsoluteUrl = (url) => {
 
 const resolveId = (entity) => {
   if (entity == null) return null;
-  if (typeof entity === "string" || typeof entity === "number") return entity;
+  if (typeof entity === "string" || typeof entity === "number") {
+    return entity;
+  }
   return entity._id ?? entity.id ?? entity.userId ?? entity.username ?? null;
 };
 
@@ -32,37 +47,25 @@ const sameId = (left, right) => {
   return String(left).toLowerCase() === String(right).toLowerCase();
 };
 
-// --- FIX: UPDATED ADAPT USER TO PRIORITIZE NAME/FULLNAME ---
-const adaptUser = (
-  user,
-  fallbackName = "\u0985\u099C\u09BE\u09A8\u09BE \u09AC\u09CD\u09AF\u09AC\u09B9\u09BE\u09B0\u0995\u09BE\u09B0\u09C0"
-) => {
+const adaptUser = (user, fallbackName = TEXT_UNKNOWN_USER) => {
   if (!user || typeof user !== "object") {
     return {
       id: fallbackName,
       name: fallbackName,
       username: undefined,
-      avatar:
-        "https://i.postimg.cc/fRVdFSbg/e1ef6545-86db-4c0b-af84-36a726924e74.png",
+      avatar: FALLBACK_AVATAR,
     };
   }
+
   const identifier = resolveId(user) ?? user.username ?? fallbackName;
   const avatarSource =
     ensureAbsoluteUrl(user.profileImage) ??
     ensureAbsoluteUrl(user.avatar) ??
-    "https://i.postimg.cc/fRVdFSbg/e1ef6545-86db-4c0b-af84-36a726924e74.png";
-
-  // LOGIC CHANGE: Check 'name', 'fullName', 'fullname' BEFORE username
-  const displayName =
-    user.name ||
-    user.fullName ||
-    user.fullname ||
-    user.username ||
-    fallbackName;
+    FALLBACK_AVATAR;
 
   return {
     id: identifier,
-    name: displayName,
+    name: user.name ?? user.username ?? fallbackName,
     username: user.username,
     avatar: avatarSource,
   };
@@ -73,48 +76,70 @@ const adaptFeedPost = (rawPost, viewerId) => {
     resolveId(rawPost) ?? rawPost?._id ?? rawPost?.id ?? `post-${Date.now()}`;
   const author = adaptUser(
     rawPost?.user ?? rawPost?.author ?? {},
-    "\u0985\u09A8\u09BE\u09AE\u09BE \u09B2\u09C7\u0996\u0995"
+    TEXT_UNKNOWN_AUTHOR
   );
-  const getSrc = (item) => {
-    if (!item) return null;
-    if (typeof item === "string") return item;
-    return item.url || item.src || item.path || null;
+
+  const coerceMediaSrc = (candidate) => {
+    if (!candidate) return null;
+    if (typeof candidate === "string") return candidate;
+    if (typeof candidate === "object") {
+      if (typeof candidate.url === "string") return candidate.url;
+      if (typeof candidate.src === "string") return candidate.src;
+      if (typeof candidate.path === "string") return candidate.path;
+    }
+    return null;
   };
 
-  const validVideos = [];
-  const rawVideosList = Array.isArray(rawPost.videos)
-    ? [...rawPost.videos]
-    : [];
-  if (rawPost.video) rawVideosList.push(rawPost.video);
-  if (rawPost.media?.video) rawVideosList.push(rawPost.media.video);
-  rawVideosList.forEach((v) => {
-    const src = ensureAbsoluteUrl(getSrc(v));
-    if (src && !validVideos.find((existing) => existing.src === src)) {
-      validVideos.push({ type: "video", src });
-    }
-  });
+  // --- VIDEO HANDLING FIX ---
+  const videoCandidates = [
+    ...(Array.isArray(rawPost?.videos) ? rawPost.videos : []),
+    rawPost?.video,
+    rawPost?.media?.video,
+  ];
 
-  const validImages = [];
-  const rawImagesList = Array.isArray(rawPost.images)
-    ? [...rawPost.images]
-    : [];
-  if (rawPost.image) rawImagesList.push(rawPost.image);
-  if (rawPost.mediaUrl) rawImagesList.push(rawPost.mediaUrl);
-  if (rawPost.coverPhoto) rawImagesList.push(rawPost.coverPhoto);
-  if (rawPost.media?.images && Array.isArray(rawPost.media.images)) {
-    rawImagesList.push(...rawPost.media.images);
+  // Extract all valid video sources
+  const videoSources = videoCandidates
+    .map(coerceMediaSrc)
+    .filter((item) => typeof item === "string" && item.trim().length > 0)
+    .map((src) => ensureAbsoluteUrl(src))
+    .filter(Boolean);
+
+  // --- IMAGE HANDLING ---
+  const imageCandidates = [
+    ...(Array.isArray(rawPost?.images) ? rawPost.images : []),
+    rawPost?.image,
+    rawPost?.mediaUrl,
+    rawPost?.media,
+    rawPost?.coverPhoto,
+    ...(Array.isArray(rawPost?.media?.images) ? rawPost.media.images : []),
+    ...(Array.isArray(rawPost?.mediaFiles) ? rawPost.mediaFiles : []),
+  ];
+
+  const imageSources = imageCandidates
+    .map(coerceMediaSrc)
+    .filter((value) => typeof value === "string" && value.trim().length > 0);
+
+  const uniqueImages = [];
+  for (const src of imageSources) {
+    const absolute = ensureAbsoluteUrl(src);
+    if (absolute && !uniqueImages.includes(absolute)) {
+      uniqueImages.push(absolute);
+    }
   }
-  const seenImages = new Set();
-  rawImagesList.forEach((img) => {
-    const src = ensureAbsoluteUrl(getSrc(img));
-    if (src && !seenImages.has(src)) {
-      seenImages.add(src);
-      validImages.push({ type: "image", src });
-    }
-  });
 
-  const mediaGallery = [...validVideos, ...validImages];
-  const media = mediaGallery.length > 0 ? mediaGallery[0] : null;
+  // --- CONSOLIDATED MEDIA GALLERY (Multiple Videos + Images) ---
+  const mediaGallery = [
+    ...videoSources.map((src) => ({ type: "video", src })),
+    ...uniqueImages.map((src) => ({ type: "image", src })),
+  ].slice(0, 10); // Limit to 10 items
+
+  // Determine main media for the card view
+  let media = mediaGallery.length > 0 ? mediaGallery[0] : null;
+
+  // Prefer first video as main media if available
+  if (videoSources.length > 0) {
+    media = { type: "video", src: videoSources[0] };
+  }
 
   const likeEntries = Array.isArray(rawPost?.likes) ? rawPost.likes : [];
   const likedUsers = likeEntries.map((entry, index) =>
@@ -122,9 +147,10 @@ const adaptFeedPost = (rawPost, viewerId) => {
       typeof entry === "object"
         ? entry
         : { id: entry, username: String(entry) },
-      `Liker ${index + 1}`
+      `${TEXT_ANONYMOUS_LIKE_PREFIX} ${index + 1}`
     )
   );
+
   const liked = viewerId
     ? likedUsers.some((user) => {
         const identifier = resolveId(user) ?? user.username;
@@ -136,11 +162,11 @@ const adaptFeedPost = (rawPost, viewerId) => {
     ? rawPost.comments.map((comment, index) => {
         const authorInfo = adaptUser(
           comment?.user ?? comment?.author ?? {},
-          `Commenter ${index + 1}`
+          `${TEXT_ANONYMOUS_COMMENT_PREFIX} ${index + 1}`
         );
         return {
-          id: comment._id.toString(),
-          _id: comment._id.toString(),
+          id: comment._id?.toString() || comment.id?.toString(),
+          _id: comment._id?.toString() || comment.id?.toString(),
           text: comment?.text ?? comment?.content ?? "",
           createdAt:
             comment?.createdAt ?? comment?.date ?? new Date().toISOString(),
@@ -170,36 +196,41 @@ const adaptFeedPost = (rawPost, viewerId) => {
 };
 
 export default function InfiniteFeed() {
-  const [searchParams, setSearchParams] = useSearchParams();
-  const navigate = useNavigate();
-  const location = useLocation();
   const [posts, setPosts] = useState([]);
   const [page, setPage] = useState(1);
   const [hasMore, setHasMore] = useState(true);
   const [isLoadingPosts, setIsLoadingPosts] = useState(false);
-  const [selectedIndex, setSelectedIndex] = useState(0);
   const loaderRef = useRef(null);
+
   const [currentUser, setCurrentUser] = useState(null);
   const [activePostId, setActivePostId] = useState(null);
   const [activeModalMode, setActiveModalMode] = useState("comments");
+  const [activePostStartIndex, setActivePostStartIndex] = useState(0);
   const [deletingCommentId, setDeletingCommentId] = useState(null);
-  const previousUrlPostId = useRef(null);
+
   const currentUserId = useMemo(() => resolveId(currentUser), [currentUser]);
   const viewerIdentity = useMemo(
     () => adaptUser(currentUser ?? {}, "আপনি"),
     [currentUser]
   );
-  console.log("current User :--->", currentUser);
+
   const getChunkSize = useCallback(
-    (pageNumber) => (pageNumber === 1 ? 30 : 10),
+    (pageNumber) => (pageNumber === 1 ? INITIAL_CHUNK : SUBSEQUENT_CHUNK),
     []
   );
 
-  const getSliceWindow = useCallback((pageNumber) => {
-    if (pageNumber === 1) return { start: 0, end: 30 };
-    const start = 30 + (pageNumber - 2) * 10;
-    return { start, end: start + 10 };
-  }, []);
+  const getSliceWindow = useCallback(
+    (pageNumber) => {
+      if (pageNumber === 1) {
+        const initialSize = getChunkSize(1);
+        return { start: 0, end: initialSize };
+      }
+      const start = INITIAL_CHUNK + (pageNumber - 2) * SUBSEQUENT_CHUNK;
+      const end = start + getChunkSize(pageNumber);
+      return { start, end };
+    },
+    [getChunkSize]
+  );
 
   const loadPosts = useCallback(async () => {
     if (isLoadingPosts || !hasMore) return;
@@ -209,10 +240,12 @@ export default function InfiniteFeed() {
       const allPosts = response?.posts ?? [];
       const { start, end } = getSliceWindow(page);
       const nextChunk = allPosts.slice(start, end);
+
       if (!nextChunk.length) {
         setHasMore(false);
         return;
       }
+
       const mapped = nextChunk.map((item) =>
         adaptFeedPost(item, currentUserId ?? null)
       );
@@ -225,29 +258,44 @@ export default function InfiniteFeed() {
         });
         return Array.from(map.values());
       });
-      if (nextChunk.length < 10) setHasMore(false);
+      if (nextChunk.length < getChunkSize(page)) {
+        setHasMore(false);
+      }
     } catch (error) {
       console.error("Failed to load posts", error);
       toast.error("পোস্ট লোড করা যায়নি");
     } finally {
       setIsLoadingPosts(false);
     }
-  }, [currentUserId, getSliceWindow, hasMore, isLoadingPosts, page]);
+  }, [
+    currentUserId,
+    getChunkSize,
+    getSliceWindow,
+    hasMore,
+    isLoadingPosts,
+    page,
+  ]);
 
   useEffect(() => {
-    if (hasMore) loadPosts();
+    if (hasMore) {
+      loadPosts();
+    }
   }, [loadPosts, hasMore]);
 
   useEffect(() => {
     const observer = new IntersectionObserver(
       (entries) => {
-        if (entries[0].isIntersecting && hasMore && !isLoadingPosts)
+        const first = entries[0];
+        if (first.isIntersecting && hasMore && !isLoadingPosts) {
           setPage((prev) => prev + 1);
+        }
       },
       { threshold: 0.1, rootMargin: "200px" }
     );
+
     const current = loaderRef.current;
     if (current) observer.observe(current);
+
     return () => {
       if (current) observer.unobserve(current);
     };
@@ -281,90 +329,29 @@ export default function InfiniteFeed() {
     );
   }, [currentUserId]);
 
-  useEffect(() => {
-    const queryPostId = searchParams.get("postId");
-    if (queryPostId) {
-      previousUrlPostId.current = queryPostId;
-      if (currentUserId && !sameId(activePostId, queryPostId)) {
-        const checkAndOpenPost = async () => {
-          const existingPost = posts.find((p) => sameId(p.id, queryPostId));
-          if (existingPost) {
-            setActivePostId(queryPostId);
-            setActiveModalMode("comments");
-          } else {
-            try {
-              const res = await fetchSinglePost(queryPostId);
-              const rawPost = res.data || res.post || res;
-              const adaptedPost = adaptFeedPost(rawPost, currentUserId);
-              setPosts((prev) => {
-                if (prev.find((p) => sameId(p.id, adaptedPost.id))) return prev;
-                return [adaptedPost, ...prev];
-              });
-              setActivePostId(queryPostId);
-              setActiveModalMode("comments");
-            } catch (error) {
-              console.error("Failed to fetch post", error);
-              const newParams = new URLSearchParams(searchParams);
-              newParams.delete("postId");
-              navigate(`${location.pathname}?${newParams.toString()}`, {
-                replace: true,
-              });
-            }
-          }
-        };
-        checkAndOpenPost();
-      }
-    } else if (previousUrlPostId.current) {
-      setActivePostId(null);
-      setActiveModalMode("comments");
-      setDeletingCommentId(null);
-      previousUrlPostId.current = null;
-    }
-  }, [
-    searchParams,
-    currentUserId,
-    posts,
-    activePostId,
-    navigate,
-    location.pathname,
-  ]);
-
-  const closeModal = useCallback(() => {
-    const urlPostId = searchParams.get("postId");
-    setSelectedIndex(0);
-    if (urlPostId) {
-      const newParams = new URLSearchParams(searchParams);
-      newParams.delete("postId");
-      navigate(`${location.pathname}?${newParams.toString()}`, {
-        replace: true,
-      });
-    } else {
-      setActivePostId(null);
-      setActiveModalMode("comments");
-      setDeletingCommentId(null);
-    }
-  }, [searchParams, navigate, location.pathname]);
-
-  // --- FULL LOGIC RESTORED FOR LIKES ---
   const handleToggleLike = useCallback(
     async (postId) => {
       setPosts((prev) =>
         prev.map((post) => {
           if (!sameId(post.id, postId)) return post;
+
           const viewerKey = viewerIdentity?.id
             ? String(viewerIdentity.id).toLowerCase()
             : null;
           const existingLikedUsers = Array.isArray(post.likedUsers)
             ? post.likedUsers
             : [];
+
           const hasViewer = viewerKey
             ? existingLikedUsers.some((user) => {
                 const identifier = resolveId(user) ?? user.username;
                 return identifier ? sameId(identifier, viewerKey) : false;
               })
             : false;
+
           let updatedLikedUsers = existingLikedUsers;
           let liked = post.liked;
+
           if (hasViewer) {
             updatedLikedUsers = existingLikedUsers.filter((user) => {
               const identifier = resolveId(user) ?? user.username;
@@ -377,6 +364,7 @@ export default function InfiniteFeed() {
               liked = true;
             }
           }
+
           const updatedRaw = post.raw
             ? {
                 ...post.raw,
@@ -389,6 +377,7 @@ export default function InfiniteFeed() {
                     }),
               }
             : post.raw;
+
           return {
             ...post,
             liked,
@@ -398,6 +387,7 @@ export default function InfiniteFeed() {
           };
         })
       );
+
       try {
         await likePost(postId);
       } catch (error) {
@@ -408,35 +398,34 @@ export default function InfiniteFeed() {
     [viewerIdentity]
   );
 
-  // --- FULL LOGIC RESTORED FOR COMMENTS ---
   const handleAddComment = useCallback(
     async (postId, text) => {
       if (!text.trim()) return;
       try {
         const response = await commentOnPost(postId, text);
-        const payload = response?.data ?? response;
-        let actualCommentData = null;
-        if (payload?.post?.comments && Array.isArray(payload.post.comments)) {
-          const commentsArray = payload.post.comments;
-          actualCommentData = commentsArray[commentsArray.length - 1];
-        } else if (payload?.comment) {
-          actualCommentData = payload.comment;
-        } else {
-          actualCommentData = payload;
-        }
-        const realId = resolveId(actualCommentData);
-        const finalId = realId ?? `comment-${Date.now()}`;
+        const payload = response?.data ?? {
+          text,
+          createdAt: new Date().toISOString(),
+          user: currentUser,
+        };
         const normalizedAuthor = adaptUser(
-          actualCommentData?.user ?? currentUser ?? {},
+          payload?.user ?? currentUser ?? {},
           "আপনি"
         );
+        const commentId =
+          resolveId(payload) ??
+          payload?._id ??
+          payload?.id ??
+          payload?.commentId ??
+          `comment-${Date.now()}`;
+
         const newComment = {
-          id: finalId,
-          _id: finalId,
-          text: actualCommentData?.text ?? text,
-          createdAt: actualCommentData?.createdAt ?? new Date().toISOString(),
+          id: commentId,
+          text: payload?.text ?? text,
+          createdAt: payload?.createdAt ?? new Date().toISOString(),
           author: normalizedAuthor,
         };
+
         setPosts((prev) =>
           prev.map((post) => {
             if (!sameId(post.id, postId)) return post;
@@ -445,7 +434,7 @@ export default function InfiniteFeed() {
                   ...post.raw,
                   comments: [
                     ...(post.raw.comments ?? []),
-                    actualCommentData ?? newComment,
+                    payload ?? newComment,
                   ],
                 }
               : post.raw;
@@ -465,7 +454,6 @@ export default function InfiniteFeed() {
     [currentUser]
   );
 
-  // --- FULL LOGIC RESTORED FOR DELETE COMMENT ---
   const handleDeleteComment = useCallback(async (postId, commentId) => {
     if (!postId || !commentId) return;
     setDeletingCommentId(commentId);
@@ -475,13 +463,13 @@ export default function InfiniteFeed() {
         prev.map((post) => {
           if (!sameId(post.id, postId)) return post;
           const filtered = post.comments.filter(
-            (c) => c._id !== commentId && c.id !== commentId
+            (comment) => (comment._id || comment.id) !== commentId
           );
           const updatedRaw = post.raw
             ? {
                 ...post.raw,
                 comments: (post.raw.comments ?? []).filter(
-                  (c) => c._id !== commentId
+                  (c) => (c._id || c.id) !== commentId
                 ),
               }
             : post.raw;
@@ -497,34 +485,35 @@ export default function InfiniteFeed() {
     }
   }, []);
 
+  const openCommentsModal = useCallback((postId, startIndex = 0) => {
+    setActiveModalMode("comments");
+    setActivePostStartIndex(Number.isFinite(startIndex) ? startIndex : 0);
+    setActivePostId(postId);
+  }, []);
+
+  const openLikesModal = useCallback((postId) => {
+    setActiveModalMode("likes");
+    setActivePostStartIndex(0);
+    setActivePostId(postId);
+  }, []);
+
+  const closeModal = useCallback(() => {
+    setActivePostId(null);
+    setActiveModalMode("comments");
+    setActivePostStartIndex(0);
+    setDeletingCommentId(null);
+  }, []);
+
   const handleDeletePost = useCallback(
     (postId) => {
       setPosts((prev) => prev.filter((p) => !sameId(p.id, postId)));
       if (sameId(activePostId, postId)) {
         setActivePostId(null);
-        const newParams = new URLSearchParams(searchParams);
-        if (newParams.get("postId")) {
-          newParams.delete("postId");
-          navigate(`${location.pathname}?${newParams.toString()}`, {
-            replace: true,
-          });
-        }
       }
       toast.success("পোস্ট মুছে ফেলা হয়েছে");
     },
-    [activePostId, searchParams, navigate, location.pathname]
+    [activePostId]
   );
-
-  const openCommentsModal = useCallback((postId, index = 0) => {
-    setActiveModalMode("comments");
-    setActivePostId(postId);
-    setSelectedIndex(index);
-  }, []);
-
-  const openLikesModal = useCallback((postId) => {
-    setActiveModalMode("likes");
-    setActivePostId(postId);
-  }, []);
 
   const activePost = useMemo(
     () => posts.find((post) => sameId(post.id, activePostId)) ?? null,
@@ -561,18 +550,20 @@ export default function InfiniteFeed() {
           />
         );
       })}
+
       {hasMore && (
         <div
           ref={loaderRef}
           style={{ height: "40px" }}
         />
       )}
+
       <PostModal
         open={Boolean(activePost)}
         post={activePost}
         mode={activeModalMode}
+        startIndex={activePostStartIndex}
         onClose={closeModal}
-        initialSlideIndex={selectedIndex}
         onToggleLike={handleToggleLike}
         onAddComment={handleAddComment}
         onDeleteComment={handleDeleteComment}
@@ -581,6 +572,3 @@ export default function InfiniteFeed() {
     </div>
   );
 }
-
-const INITIAL_CHUNK = 30;
-const SUBSEQUENT_CHUNK = 10;

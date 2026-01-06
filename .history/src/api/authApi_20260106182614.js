@@ -21,21 +21,8 @@ export const loginUser = (data) => {
 export const fetchNotifications = () =>
   request("/notifications", { method: "GET" });
 
-// NEW: Delete single notification
-export const deleteNotification = (id) => {
-  return request(`/notifications/${id}`, {
-    method: "DELETE",
-    credentials: "include",
-  });
-};
+// delete notification
 
-// NEW: Clear all notifications
-export const clearAllNotifications = () => {
-  return request(`/notifications/clear-all`, {
-    method: "DELETE",
-    credentials: "include",
-  });
-};
 
 // Get me
 export const fetchMe = () => request("/users/me", { method: "GET" });
@@ -161,11 +148,6 @@ export const deleteComment = (postId, commentId) => {
     method: "DELETE",
     credentials: "include",
   });
-};
-
-// fetch single post
-export const fetchSinglePost = (postId) => {
-  return request(`/posts/${postId}`, { method: "GET" });
 };
 
 // add galleries

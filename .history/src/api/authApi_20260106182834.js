@@ -163,11 +163,6 @@ export const deleteComment = (postId, commentId) => {
   });
 };
 
-// fetch single post
-export const fetchSinglePost = (postId) => {
-  return request(`/posts/${postId}`, { method: "GET" });
-};
-
 // add galleries
 export const addGalleries = (formData) => {
   return request("/galleries/create", {
